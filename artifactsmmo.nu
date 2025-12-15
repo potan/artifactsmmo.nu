@@ -1,14 +1,26 @@
 
+use std/log
+
 $env.API = "https://api.artifactsmmo.com/"
+$env.API_TIMEOUT = 100sec
+
 def "mmo get" [query] {
   let api = $env.API
-  http get $"($api)($query)"
+  let timeout = $env.API_TIMEOUT
+  try {
+    http get --max-time $timeout $"($api)($query)"
+  } catch { |err|
+    print $err
+    log error $err.msg
+    log debug $err.debug
+    mmo get $query
+  }
 }
 
 def "mmo load" [query] {
   let r = mmo get $query
   mut data = $r.data
-  let pages = $r.pages
+  let pages = try { $r.pages } catch { 0 }
   if $pages > 1 {
     for page in 2..$pages {
      let r = mmo get $"($query)?page=($page)"
@@ -43,9 +55,39 @@ def "mmo item" [m: string@items] { $env.ITEMS | where code == $m | get 0 }
 
 let token = open artifactsmmo.token | lines | get 0
 
-def "my characters" [] {
+def "my get" [query] {
   let api = $env.API
-  (http get --headers { Authorization: $"Bearer ($token)" } $"($api)my/characters").data | insert when (date now)
+  let timeout = $env.API_TIMEOUT
+  try {
+    http get --max-time $timeout --headers { Authorization: $"Bearer ($token)" } $"($api)my/($query)"
+  } catch { |err|
+    print $err
+    log error $err.msg
+    log debug $err.debug
+    my get $query
+  }
+}
+
+def "my load" [query] {
+  let r = my get $query
+  mut data = $r.data
+  let pages = try { $r.pages } catch { 0 }
+  if $pages > 1 {
+    for page in 2..$pages {
+     let r = my get $"($query)?page=($page)"
+     $data = $data | append $r.data
+    }
+  }
+  $data
+}
+
+
+def "my logs" [] {
+  my load logs
+}
+
+def "my characters" [] {
+  my load characters
 }
 
 def --env "mmo load_characters" [] {
@@ -55,27 +97,54 @@ mmo load_characters
 
 def characters [] { $env.CHARACTERS | get name }
 
+def "my log" [name: string@characters] {
+  my load $"logs/($name)"
+}
+
 def actions [] {
-  [move, fight, rest]
+  [move, fight, rest, transition, equip, unequip, use, gathering, crafting, bank/deposit/gold, bank/deposit/item,
+  bank/withdraw/item, bank/withdraw/gold, bank/buy_expansion, npc/buy, npc/sell, recycling, grandexchange/buy,
+  grandexchange/sell, grandexchange/cancel, task/complete, task/exchange, task/new, task/trade, task/cancel,
+  give/gold, give/item, delete]
 }
 
 def --env act [name: string@characters, action: string@actions, data] {
   let api = $env.API
-  let resp = http post --allow-errors --headers { Authorization: $"Bearer ($token)", Content-Type: application/json } --content-type application/json $"($api)my/($name)/action/($action)" $data
-  match $resp {
-    {data: $data} => $data
-    {error: $error} => {
-      match ($error.code) {
-        490 => "DoNothing"
-        499 => {
-          sleep ($error.message | parse --regex '(?P<cooldown>\d+(?:\.\d*)?)' | get 0 | get cooldown | into duration --unit sec)
-          act $name $action $data
+  let timeout = $env.API_TIMEOUT
+  try {
+    let resp = http post --max-time $timeout --allow-errors --headers { Authorization: $"Bearer ($token)", Content-Type: application/json } --content-type application/json $"($api)my/($name)/action/($action)" $data
+    match $resp {
+      {data: $data} => {
+        let old = $env.CHARACTERS
+        let new = try {
+          $data.character
+        } catch { |err|
+          $data.characters | where name == $name | get 0
         }
-        _ => {
-          println $error
-          $error
+        $env.CHARACTERS = $old | where name != $name | append ($new | insert when (date now))
+        $data
+      }
+      {error: $error} => {
+        match ($error.code) {
+          490 => {
+            {result: "DoNothing", character: ($env.CHARACTERS | where name == $name | get 0)}
+          }
+          499 => {
+            sleep ($error.message | parse --regex '(?P<cooldown>\d+(?:\.\d*)?)' | get 0 | get cooldown | into duration --unit sec)
+            act $name $action $data
+          }
+          _ => {
+            print $error
+            log error $error.message
+            $error
+          }
         }
       }
     }
+  } catch { |err|
+    print $err
+    log error $err.msg
+    log debug $err.debug
+    act $name $action $data
   }
 }
