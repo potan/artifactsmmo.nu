@@ -1,2 +1,2 @@
 # artifactsmmo.nu
-Nu-shell commands fo playing ArtifactsMMO
+Nu-shell commands for playing ArtifactsMMO
