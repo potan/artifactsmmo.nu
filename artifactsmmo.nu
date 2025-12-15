@@ -87,7 +87,7 @@ def "my logs" [] {
 }
 
 def "my characters" [] {
-  my load characters
+  my load characters | insert when (date now)
 }
 
 def --env "mmo load_characters" [] {
@@ -116,12 +116,16 @@ def --env act [name: string@characters, action: string@actions, data] {
     match $resp {
       {data: $data} => {
         let old = $env.CHARACTERS
-        let new = try {
-          $data.character
+        try {
+          let new = $data.character
+          $env.CHARACTERS = $old | where name != $name | append ($new | insert when (date now))
         } catch { |err|
-          $data.characters | where name == $name | get 0
+          let new = $data.characters
+          let participants = $new | select name
+          $env.CHARACTERS = $old | filter { |row|
+            ($participants | filter { |n| $n.name == $row.name}) == []
+          } | append ($new | insert when (date now))
         }
-        $env.CHARACTERS = $old | where name != $name | append ($new | insert when (date now))
         $data
       }
       {error: $error} => {
