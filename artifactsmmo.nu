@@ -108,7 +108,7 @@ def actions [] {
   give/gold, give/item, delete]
 }
 
-def --env act [name: string@characters, action: string@actions, data] {
+def --env act [name: string@characters, action: string@actions, data = {}] {
   let api = $env.API
   let timeout = $env.API_TIMEOUT
   try {
@@ -122,8 +122,8 @@ def --env act [name: string@characters, action: string@actions, data] {
         } catch { |err|
           let new = $data.characters
           let participants = $new | select name
-          $env.CHARACTERS = $old | filter { |row|
-            ($participants | filter { |n| $n.name == $row.name}) == []
+          $env.CHARACTERS = $old | where { |row|
+            ($participants | where name == $row.name) == []
           } | append ($new | insert when (date now))
         }
         $data
@@ -151,4 +151,32 @@ def --env act [name: string@characters, action: string@actions, data] {
     log debug $err.debug
     act $name $action $data
   }
+}
+
+def crafts [] {
+  $env.ITEMS | where craft != null | get code
+}
+
+def need [item: string@crafts, quantity: int  = 1] {
+   $env.ITEMS | where { |r| $r.code == $item } | get 0 | get craft.items | update quantity { |q| $q.quantity * $quantity}
+}
+
+def xy [x:int, y:int] {
+  {x:$x, y:$y}
+}
+
+def item [code: string@items, num: int] {
+  {code: $code, quantity: $num}
+}
+
+def please [name: string@characters, block] {
+  let save = $env.CURCHR
+  $env.CURCHR = $name
+  do $block
+  $env.CURCHR = $save
+}
+
+def work [action: string@actions, data] {
+  let chr = $env.CURCHR
+  act $chr $action $data
 }
