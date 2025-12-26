@@ -108,7 +108,7 @@ def actions [] {
   give/gold, give/item, delete]
 }
 
-def --env act [name: string@characters, action: string@actions, data = {}] {
+def --env act [name: string@characters, action: string@actions, data: any = {}] {
   let api = $env.API
   let timeout = $env.API_TIMEOUT
   try {
