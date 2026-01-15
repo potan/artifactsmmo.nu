@@ -3,6 +3,7 @@ use std/log
 
 $env.API = "https://api.artifactsmmo.com/"
 $env.API_TIMEOUT = 100sec
+$env.PAGESIZE = 10
 
 def "mmo get" [query] {
   let api = $env.API
@@ -10,6 +11,7 @@ def "mmo get" [query] {
   try {
     http get --max-time $timeout $"($api)($query)"
   } catch { |err|
+    print $query
     print $err
     log error $err.msg
     log debug $err.debug
@@ -19,11 +21,12 @@ def "mmo get" [query] {
 
 def "mmo load" [query] {
   let r = mmo get $query
+  let sep = if $query =~ \? { "&" } else { "?" }
   mut data = $r.data
   let pages = try { $r.pages } catch { 0 }
   if $pages > 1 {
     for page in 2..$pages {
-     let r = mmo get $"($query)?page=($page)"
+     let r = mmo get $"($query)($sep)page=($page)"
      $data = $data | append $r.data
     }
   }
@@ -31,12 +34,12 @@ def "mmo load" [query] {
 }
 
 def --env "mmo load_monsters" [] {
-  $env.MONSTERS = mmo load monsters
+  $env.MONSTERS = mmo load $"monsters?size=($env.PAGESIZE)"
 }
 mmo load_monsters
 
 def --env "mmo load_map" [] {
-  $env.MAP = mmo load maps
+  $env.MAP = mmo load $"maps?size=($env.PAGESIZE)"
 }
 mmo load_map
 
@@ -45,13 +48,23 @@ def monsters [] { $env.MONSTERS | get code }
 def "mmo monster" [m: string@monsters] { $env.MONSTERS | where code == $m | get 0 }
 
 def --env "mmo load_items" [] {
-  $env.ITEMS = mmo load items
+  $env.ITEMS = mmo load $"items?size=($env.PAGESIZE)"
+  $env.NPCS_ITEMS = mmo load $"npcs/items?size=($env.PAGESIZE)"
 }
 mmo load_items
 
 def items [] { $env.ITEMS | get code }
 
 def "mmo item" [m: string@items] { $env.ITEMS | where code == $m | get 0 }
+
+def "mmo current" [] {
+  mmo load events/active
+# update $env.MAP
+}
+
+def "mmo find" [what: string] {
+  mmo load $"maps?size=($env.PAGESIZE)&content_code=($what)"
+}
 
 let token = open artifactsmmo.token | lines | get 0
 
@@ -73,8 +86,9 @@ def "my load" [query] {
   mut data = $r.data
   let pages = try { $r.pages } catch { 0 }
   if $pages > 1 {
+    let sep = if $query =~ \? { "&" } else { "?" }
     for page in 2..$pages {
-     let r = my get $"($query)?page=($page)"
+     let r = my get $"($query)($sep)page=($page)"
      $data = $data | append $r.data
     }
   }
@@ -169,14 +183,29 @@ def item [code: string@items, num: int] {
   {code: $code, quantity: $num}
 }
 
+def "bank items" [] {
+  my load bank/items | join $env.ITEMS code code | select code quantity level type subtype
+}
+
+def bag_items [context: string] {
+  print $context
+  let w = $context | split words
+  let name = $w | get 1
+  $env.CHARACTERS | where name == $name | get inventory | get 0 | where code != "" | get code
+}
+
+def has [name: string@characters, item: string@bag_items] {
+  $env.CHARACTERS | where name == $name | get inventory | get 0 | where code == $item | get quantity | append [0] | get 0
+}
+
 def please [name: string@characters, block] {
-  let save = $env.CURCHR
+  let save = try { $env.CURCHR } catch {|e| $name }
   $env.CURCHR = $name
   do $block
   $env.CURCHR = $save
 }
 
-def work [action: string@actions, data] {
+def work [action: string@actions, data: any = {}] {
   let chr = $env.CURCHR
   act $chr $action $data
 }
