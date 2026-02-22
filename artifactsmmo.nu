@@ -101,7 +101,8 @@ def "my logs" [] {
 }
 
 def "my characters" [] {
-  my load characters | insert when (date now)
+  let d = date now
+  my load characters | insert when $d | insert cooldown_until $d
 }
 
 def --env "mmo load_characters" [] {
@@ -122,48 +123,71 @@ def actions [] {
   give/gold, give/item, delete]
 }
 
-def --env act [name: string@characters, action: string@actions, data: any = {}] {
+def "mmo post" [action: string, data: any] {
   let api = $env.API
   let timeout = $env.API_TIMEOUT
   try {
-    let resp = http post --max-time $timeout --allow-errors --headers { Authorization: $"Bearer ($token)", Content-Type: application/json } --content-type application/json $"($api)my/($name)/action/($action)" $data
-    match $resp {
-      {data: $data} => {
-        let old = $env.CHARACTERS
-        try {
-          let new = $data.character
-          $env.CHARACTERS = $old | where name != $name | append ($new | insert when (date now))
-        } catch { |err|
-          let new = $data.characters
-          let participants = $new | select name
-          $env.CHARACTERS = $old | where { |row|
-            ($participants | where name == $row.name) == []
-          } | append ($new | insert when (date now))
-        }
-        $data
-      }
-      {error: $error} => {
-        match ($error.code) {
-          490 => {
-            {result: "DoNothing", character: ($env.CHARACTERS | where name == $name | get 0)}
-          }
-          499 => {
-            sleep ($error.message | parse --regex '(?P<cooldown>\d+(?:\.\d*)?)' | get 0 | get cooldown | into duration --unit sec)
-            act $name $action $data
-          }
-          _ => {
-            print $error
-            log error $error.message
-            $error
-          }
-        }
-      }
-    }
+    http post --max-time $timeout --allow-errors --headers { Authorization: $"Bearer ($token)", Content-Type: application/json } --content-type application/json $"($api)($action)" $data
   } catch { |err|
     print $err
     log error $err.msg
     log debug $err.debug
-    act $name $action $data
+    mmo post $action $data
+  }
+}
+
+def --env "mmo create character" [name: string, skin: string = "women2"] {
+  let resp = mmo post "characters/create" {name:$name, skin:$skin}
+  match $resp {
+    {data: $ch} => {
+      $env.CHARACTERS = $env.CHARACTERS | append ($ch | insert when (date now) | insert cooldown_until (date now))
+      $ch
+    }
+    {error: $error} => {
+      print $error.message
+      $error
+    }
+  }
+}
+
+def --env act [name: string@characters, action: string@actions, data: any = {}] {
+  let wait_until = $env.CHARACTERS | where name == $name | get 0 | get cooldown_until
+  if $wait_until > (date now) {
+    sleep ($wait_until - (date now))
+  }
+  let resp = mmo post $"my/($name)/action/($action)" $data
+  match $resp {
+    {data: $data} => {
+      let cooldown = try { $data.cooldown.expiration | into datetime } catch { date now }
+      let old = $env.CHARACTERS
+      try {
+        let new = $data.character
+        $env.CHARACTERS = $old | where name != $name | append ($new | insert when (date now) | insert cooldown_until $cooldown)
+      } catch { |err|
+        let new = $data.characters
+        let participants = $new | select name
+        $env.CHARACTERS = $old | where { |row|
+          ($participants | where name == $row.name) == []
+        } | append ($new | insert when (date now) | insert cooldown_until $cooldown)
+      }
+      $data
+    }
+    {error: $error} => {
+      match ($error.code) {
+        490 => {
+          {result: "DoNothing", character: ($env.CHARACTERS | where name == $name | get 0)}
+        }
+        499 => {
+          sleep ($error.message | parse --regex '(?P<cooldown>\d+(?:\.\d*)?)' | get 0 | get cooldown | into duration --unit sec)
+          act $name $action $data
+        }
+        _ => {
+          print $error
+          log error $error.message
+          $error
+        }
+      }
+    }
   }
 }
 
@@ -205,7 +229,52 @@ def please [name: string@characters, block] {
   $env.CURCHR = $save
 }
 
-def work [action: string@actions, data: any = {}] {
+def --env work [action: string@actions, data: any = {}] {
   let chr = $env.CURCHR
   act $chr $action $data
 }
+
+def --env deposit [items: list, name: string@characters = ""] {
+  let chr = if $name == "" { $env.CURCHR } else { $name }
+  let set = $items | each {|i| {code: $i, quantity:(has $chr $i)} } | where quantity != 0
+  if $set != [] {
+    act $chr bank/deposit/item $set
+  }
+}
+
+def max [a, b] {
+  if $a < $b { $b } else { $a }
+}
+
+def min [a, b] {
+  if $a > $b { $b } else { $a }
+}
+
+# Fill utility slot.
+def --env efill [uslot, potion, name: string@characters = ""] {
+  let chr = if $name == "" { $env.CURCHR } else { $name }
+  let c = $env.CHARACTERS | where name == $chr | get 0
+  let n = 100 - ($c | get $"utility($uslot)_slot_quantity")
+  let m = min $n (has $chr $potion)
+  if $m > 0 {
+    act $chr equip {code:$potion, slot:$"utility($uslot)", quantity:$m}
+  }
+}
+
+def inventory [w: string@items = ""] {
+  let i = $env.CHARACTERS | each { |c| $c.inventory | where code != "" | insert name $c.name | select name code quantity } | flatten | join $env.ITEMS code code | select  name code quantity level type subtype # | append $bank
+  if w == "" {
+    $i
+  } else {
+    $i | where code =~ $w
+  }
+}
+
+def errcode [r] {
+  try {
+    $r.code
+  } catch { |e|
+    200
+  }
+}
+
