@@ -2,8 +2,19 @@
 use std/log
 
 $env.API = "https://api.artifactsmmo.com/"
-$env.API_TIMEOUT = 100sec
+$env.API_TIMEOUT = 90sec
 $env.PAGESIZE = 10
+
+def title [txt: string = ""] {
+  let txt = if $txt == "" {
+    try { $env.CURCHR } catch { "MMO" }
+  } else { $txt }
+  print -n $"(ansi title)($txt)(ansi st)"
+}
+
+$env.config.hooks.pre_prompt = [{||
+  title # (if "LAST_CMD" in $env { $env.LAST_CMD } else { "" })
+}]
 
 def "mmo get" [query] {
   let api = $env.API
@@ -15,6 +26,7 @@ def "mmo get" [query] {
     print $err
     log error $err.msg
     log debug $err.debug
+    sleep 20sec
     mmo get $query
   }
 }
@@ -45,7 +57,11 @@ mmo load_map
 
 def monsters [] { $env.MONSTERS | get code }
 
-def "mmo monster" [m: string@monsters] { $env.MONSTERS | where code == $m | get 0 }
+def "mmo monster" [m: string@monsters] {
+  let d = $env.MONSTERS | where code == $m | get 0
+  let w = $env.MAP | where interactions.content != null and interactions.content.type == monster and interactions.content.code == $m | select x y layer
+  $d | insert location $w
+}
 
 def --env "mmo load_items" [] {
   $env.ITEMS = mmo load $"items?size=($env.PAGESIZE)"
@@ -53,9 +69,9 @@ def --env "mmo load_items" [] {
 }
 mmo load_items
 
-def items [] { $env.ITEMS | get code }
+def mitems [] { $env.ITEMS | get code }
 
-def "mmo item" [m: string@items] { $env.ITEMS | where code == $m | get 0 }
+def "mmo item" [m: string@mitems] { $env.ITEMS | where code == $m | get 0 }
 
 def "mmo current" [] {
   mmo load events/active
@@ -74,9 +90,11 @@ def "my get" [query] {
   try {
     http get --max-time $timeout --headers { Authorization: $"Bearer ($token)" } $"($api)my/($query)"
   } catch { |err|
+    print $query
     print $err
     log error $err.msg
     log debug $err.debug
+    sleep 20sec
     my get $query
   }
 }
@@ -101,8 +119,11 @@ def "my logs" [] {
 }
 
 def "my characters" [] {
+  let cooldowns = try {
+    $env.CHARACTERS | each  { |$c|  {0:$c.name, 1:$c.cooldown_until} } | transpose -r | get 0
+  } catch { {} }
   let d = date now
-  my load characters | insert when $d | insert cooldown_until $d
+  my load characters | insert when $d | insert cooldown_until { |c| try { $cooldowns | get ($c.name) } catch { $d } }
 }
 
 def --env "mmo load_characters" [] {
@@ -123,16 +144,19 @@ def actions [] {
   give/gold, give/item, delete]
 }
 
-def "mmo post" [action: string, data: any] {
+def "mmo post" [--retry = true, action: string, data: any] {
   let api = $env.API
   let timeout = $env.API_TIMEOUT
   try {
     http post --max-time $timeout --allow-errors --headers { Authorization: $"Bearer ($token)", Content-Type: application/json } --content-type application/json $"($api)($action)" $data
   } catch { |err|
+    print $action
     print $err
     log error $err.msg
     log debug $err.debug
-    mmo post $action $data
+    if $retry {
+      mmo post $action $data
+    }
   }
 }
 
@@ -150,12 +174,14 @@ def --env "mmo create character" [name: string, skin: string = "women2"] {
   }
 }
 
-def --env act [name: string@characters, action: string@actions, data: any = {}] {
-  let wait_until = $env.CHARACTERS | where name == $name | get 0 | get cooldown_until
+def --env act [--retry = true, name: string@characters, action: string@actions, data: any = {}] {
+  let wait_until = try {
+    $env.CHARACTERS | where name == $name | get 0 | get cooldown_until
+  } catch { date now }
   if $wait_until > (date now) {
     sleep ($wait_until - (date now))
   }
-  let resp = mmo post $"my/($name)/action/($action)" $data
+  let resp = mmo post --retry $retry $"my/($name)/action/($action)" $data
   match $resp {
     {data: $data} => {
       let cooldown = try { $data.cooldown.expiration | into datetime } catch { date now }
@@ -179,7 +205,7 @@ def --env act [name: string@characters, action: string@actions, data: any = {}] 
         }
         499 => {
           sleep ($error.message | parse --regex '(?P<cooldown>\d+(?:\.\d*)?)' | get 0 | get cooldown | into duration --unit sec)
-          act $name $action $data
+          act --retry $retry $name $action $data
         }
         _ => {
           print $error
@@ -203,7 +229,7 @@ def xy [x:int, y:int] {
   {x:$x, y:$y}
 }
 
-def item [code: string@items, num: int] {
+def item [code: string@mitems, num: int] {
   {code: $code, quantity: $num}
 }
 
@@ -222,9 +248,10 @@ def has [name: string@characters, item: string@bag_items] {
   $env.CHARACTERS | where name == $name | get inventory | get 0 | where code == $item | get quantity | append [0] | get 0
 }
 
-def please [name: string@characters, block] {
+def --env please [name: string@characters, block] {
   let save = try { $env.CURCHR } catch {|e| $name }
   $env.CURCHR = $name
+#export-env $block
   do $block
   $env.CURCHR = $save
 }
@@ -234,9 +261,10 @@ def --env work [action: string@actions, data: any = {}] {
   act $chr $action $data
 }
 
-def --env deposit [items: list, name: string@characters = ""] {
+def --env deposit [mitems: list, name: string@characters = ""] {
   let chr = if $name == "" { $env.CURCHR } else { $name }
-  let set = $items | each {|i| {code: $i, quantity:(has $chr $i)} } | where quantity != 0
+  let set = $env.CHARACTERS | where name == $name | get inventory | get 0 | where code in $mitems | select code quantity
+#  let set = $mitems | each {|i| {code: $i, quantity:(has $chr $i)} } | where quantity != 0
   if $set != [] {
     act $chr bank/deposit/item $set
   }
@@ -257,11 +285,11 @@ def --env efill [uslot, potion, name: string@characters = ""] {
   let n = 100 - ($c | get $"utility($uslot)_slot_quantity")
   let m = min $n (has $chr $potion)
   if $m > 0 {
-    act $chr equip {code:$potion, slot:$"utility($uslot)", quantity:$m}
+    act $chr equip [{code:$potion, slot:$"utility($uslot)", quantity:$m}]
   }
 }
 
-def inventory [w: string@items = ""] {
+def inventory [w: string@mitems = ""] {
   let i = $env.CHARACTERS | each { |c| $c.inventory | where code != "" | insert name $c.name | select name code quantity } | flatten | join $env.ITEMS code code | select  name code quantity level type subtype # | append $bank
   if w == "" {
     $i
@@ -278,3 +306,28 @@ def errcode [r] {
   }
 }
 
+def --env cha [--load = true, name: string@characters = ""] {
+  let chr = if $name == "" { $env.CURCHR } else { $name }
+  if $load {
+    mmo load_characters
+  }
+  $env.CHARACTERS | where name == $chr | get 0
+}
+
+def get_event [l, d] {
+ mmo load events/active | join $l code code | insert place { |r| {x: $r.map.x, y: $r.map.y, layer: $r.map.layer } } | append [$d] | get 0
+}
+
+def slots [] {
+  [weapon rune shield helmet body_armor leg_armor boots ring1 ring2 amulet artifact1 artifact2 artifact3 utility1 utility2 bag]
+}
+
+def slot [--load = false, slot: string@slots, name: string@characters = ""] {
+  (cha --load $load $name) | get $"($slot)_slot"
+}
+
+def --env equip [e, name: string@characters = ""] {
+  if (slot $e.slot $name) != $e.code {
+    act $name equip [$e]
+  }
+}
